@@ -3,6 +3,7 @@
 use failure::{Context, Error, ResultExt};
 use semver::VersionReq;
 use serde_derive::{Deserialize, Serialize};
+use serde::de::Visitor;
 
 use super::error::*;
 use super::identification::{PackageFullName, PackageID};
@@ -27,11 +28,12 @@ pub struct SoftPackageRequirement {
 impl SoftPackageRequirement {
     /// Creates a package requirement that matches the given [`PackageFullName`] and version requirement
     #[inline]
-    pub fn from(full_name: &PackageFullName, version_req: VersionReq) -> SoftPackageRequirement {
+    pub fn from(full_name: PackageFullName, version_req: VersionReq) -> SoftPackageRequirement {
+        let (repository, category, name) = full_name.into_tuple();
         SoftPackageRequirement {
-            repository: Some(full_name.repository().clone()),
-            category: Some(full_name.category().clone()),
-            name: full_name.name().clone(),
+            repository: Some(repository),
+            category: Some(category),
+            name,
             version_requirement: version_req,
         }
     }
@@ -217,6 +219,17 @@ impl std::fmt::Display for SoftPackageRequirement {
     }
 }
 
+impl From<PackageRequirement> for SoftPackageRequirement {
+    fn from(package_req: PackageRequirement) -> Self {
+        Self {
+            repository: package_req.repository,
+            category: Some(package_req.category),
+            name: package_req.name,
+            version_requirement: package_req.version_requirement,
+        }
+    }
+}
+
 /// A structure representing a package requirement: parts of a package name and a
 /// version requirement.
 ///
@@ -224,7 +237,7 @@ impl std::fmt::Display for SoftPackageRequirement {
 /// for exemple, any version of a package named 'sys-bin/gcc' in any repository)
 ///
 /// The version requirement follows SemVer v2
-#[derive(Serialize, Deserialize, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub struct PackageRequirement {
     repository: Option<RepositoryName>,
     category: CategoryName,
@@ -235,11 +248,13 @@ pub struct PackageRequirement {
 impl PackageRequirement {
     /// Creates a package requirement that matches the given [`PackageFullName`] and version requirement
     #[inline]
-    pub fn from(full_name: &PackageFullName, version_req: VersionReq) -> PackageRequirement {
+    pub fn from(full_name: PackageFullName, version_req: VersionReq) -> PackageRequirement {
+        let (repository, category, name) = full_name.into_tuple();
+
         PackageRequirement {
-            repository: Some(full_name.repository().clone()),
-            category: full_name.category().clone(),
-            name: full_name.name().clone(),
+            repository: Some(repository),
+            category,
+            name,
             version_requirement: version_req,
         }
     }
@@ -353,6 +368,29 @@ impl PackageRequirement {
         &self.version_requirement
     }
 
+    /// Tests if a given [`PackageFullName`] matches this package requirement, matching the name imprecisely
+    /// The name of the package only needs to contain the name of the requirement to match
+    #[inline]
+    pub fn matches_full_name(&self, full_name: &PackageFullName) -> bool {
+        let mut out = true;
+        if let Some(repository) = &self.repository {
+            out &= repository == full_name.repository();
+        }
+        out && (&self.category == full_name.category())
+            && (full_name.name().contains(self.name.as_ref()))
+    }
+
+    /// Tests if a given [`PackageFullName`] matches this package requirement, matching the name precisely
+    /// The name of the package needs to be exactly equal to the name of the requirement to match
+    #[inline]
+    pub fn matches_full_name_precisely(&self, full_name: &PackageFullName) -> bool {
+        let mut out = true;
+        if let Some(repository) = &self.repository {
+            out &= repository == full_name.repository();
+        }
+        out && (&self.category == full_name.category()) && (full_name.name() == &self.name)
+    }
+
     /// Tests if a given [`PackageID`] matches this package requirement, matching the name imprecisely
     /// The name of the package only needs to contain the name of the requirement to match
     ///
@@ -424,7 +462,47 @@ impl std::fmt::Display for PackageRequirement {
     }
 }
 
-/// A structure represenging a hard package requirement.
+struct PackageRequirementVisitor;
+
+impl<'de> Visitor<'de> for PackageRequirementVisitor {
+    type Value = PackageRequirement;
+
+    #[inline]
+    fn expecting(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+        fmt.write_str("a package requirement")
+    }
+
+    #[inline]
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+    {
+        PackageRequirement::parse(value).map_err(|_| {
+            E::custom("the package requirement doesn't follow the convention `repository::category/name#version_requirement`")
+        })
+    }
+}
+
+impl_serde_visitor!(PackageRequirement, PackageRequirementVisitor);
+
+impl From<HardPackageRequirement> for PackageRequirement {
+    fn from(package_req: HardPackageRequirement) -> Self {
+        let HardPackageRequirement {
+            full_name,
+            version_requirement,
+        } = package_req;
+        let (repository, category, name) = full_name.into_tuple();
+
+        Self {
+            repository: Some(repository),
+            category,
+            name,
+            version_requirement,
+        }
+    }
+}
+
+/// A structure representing a hard package requirement.
 /// This type of requirement is said to be "hard", because only the version has yet to be selected.
 /// The other parts of the package information (repository, category and name) are already known.
 #[derive(Serialize, Deserialize, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
@@ -470,6 +548,6 @@ impl std::fmt::Display for HardPackageRequirement {
 
 impl std::convert::Into<SoftPackageRequirement> for HardPackageRequirement {
     fn into(self) -> SoftPackageRequirement {
-        SoftPackageRequirement::from(&self.full_name, self.version_requirement)
+        SoftPackageRequirement::from(self.full_name, self.version_requirement)
     }
 }
